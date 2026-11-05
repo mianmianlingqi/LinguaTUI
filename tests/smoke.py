@@ -417,8 +417,8 @@ async def main() -> int:
         app6.mirror_selection(rt)
         await pilot.pause(0.2)
         check(
-            lt.selected_text.strip() == "第二段",
-            f"英文小段 -> 中文只高亮对应词 {lt.selected_text!r}",
+            lt.selected_text.strip() == "第二段甲",
+            f"英文小段 -> 中文只高亮对应分句 {lt.selected_text!r}",
         )
 
         lt.selection = Selection((5, 0), (6, 3))
@@ -444,13 +444,36 @@ async def main() -> int:
 
         # 段落数对不上时不做对照
         rt.load_text("only one block")
+        await pilot.pause()
         app6._clear_mirror()
         lt.selection = Selection((0, 0), (0, 5))
         app6.mirror_selection(lt)
         await pilot.pause(0.2)
+        check(not app6._mirror_exact, "段落数不同 -> 标记为近似对照")
+        check(bool(rt.selected_text.strip()), f"段落数不同也给近似高亮 {rt.selected_text!r}")
+
+        # 分句兜底：比例定位会差一两个词，但最终一定落在正确的分句里
+        lt.load_text("该方法也不同于 ROME 等模型编辑方法，后者使用固定算法进行狭窄的更改，例如更新单个事实。")
+        rt.load_text(
+            "The approach also differs from model editing methods such as ROME, which use a "
+            "fixed algorithm to make narrow changes like updating a single fact."
+        )
+        await pilot.pause()
+        lt.selection = Selection((0, 1), (0, 7))
+        app6.mirror_selection(lt)
+        await pilot.pause(0.2)
         check(
-            tuple(rt.selection.start) == tuple(rt.selection.end),
-            "段落数不一致时不高亮",
+            "model editing methods" in rt.selected_text
+            and "narrow changes" not in rt.selected_text,
+            f"分句级兜底 -> {rt.selected_text!r}",
+        )
+        # 整句选择 -> 整句高亮
+        lt.selection = Selection((0, 0), (0, len(lt.text)))
+        app6.mirror_selection(lt)
+        await pilot.pause(0.2)
+        check(
+            rt.selected_text.strip().startswith("The approach also differs"),
+            f"整句选择 -> 整句高亮 {rt.selected_text[:40]!r}",
         )
 
     # leave the user's config tidy

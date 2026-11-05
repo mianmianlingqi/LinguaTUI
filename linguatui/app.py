@@ -344,7 +344,8 @@ HELP_MD = """
 * `a` 替换原文 / `i` 插入另一栏 / `c` 复制 / `r` 重译 / `Esc` 关闭；
 * 方向永远指向另一栏的语言：右栏选英文，小窗里就是中文。
 
-对齐是分层的：段落（空行）→ 句子（。！？；.!?）→ 句内按比例落到具体词组，并把边界扩到完整单词。
+对齐是分层的：段落（空行）→ 句子（。！？；.!?）→ 句内按比例定位，再把首尾扩到完整单词和包含它的分句。
+所以即使比例算差一两个词，高亮也一定覆盖到正确的分句（英文没逗号时就是整句），不会只点亮隔壁半句。
 两栏段落数不一致时会退化成“按整篇相对位置找段”；改动任一栏文字或点击别处，高亮自动清除。
 
 如果某个终端不上报鼠标事件的 Ctrl 修饰键，选中后按 `Ctrl+G`，效果一样。
@@ -563,6 +564,30 @@ def _map_offsets(src: str, tgt: str, start: int, end: int) -> tuple[int, int]:
     return int(ratio_start * len(tgt) + 0.5), int(ratio_end * len(tgt) + 0.5)
 
 
+_CLAUSE_STOP = "，,；;、。.!?！？\n"
+
+
+def _dilate_to_clause(text: str, start: int, end: int) -> tuple[int, int]:
+    """把区间扩到「包含它的分句」边界。
+
+    纯按比例算出来的位置经常差一两个词（中英密度不同），扩到分句之后
+    就不会出现“只点亮隔壁半句”的错觉；英文没有逗号时自然退化成整句。
+    """
+    left = max(0, min(start, len(text)))
+    while left > 0 and text[left - 1] not in _CLAUSE_STOP:
+        left -= 1
+    right = max(left, min(end, len(text)))
+    while right < len(text) and text[right] not in _CLAUSE_STOP:
+        right += 1
+    if right < len(text) and text[right] in "，,；;、":
+        right += 1
+    while left < right and text[left].isspace():
+        left += 1
+    while right > left and text[right - 1].isspace():
+        right -= 1
+    return left, right
+
+
 def _flat_offset(lines: list[str], first_row: int, location: tuple[int, int]) -> int:
     """Character offset of ``location`` relative to ``lines[first_row]``."""
     row, column = location
@@ -630,6 +655,8 @@ class Linguatui(App[None]):
         self._live_last: dict[str, tuple[str, str]] = {}
         self.sync_selection = self.cfg.sync_selection
         self._mirror_side: str | None = None
+        self._mirror_exact = True
+        self._mirror_timer = None
 
     # -- construction ------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -795,6 +822,11 @@ class Linguatui(App[None]):
             bits.append(f"已选 {selected} 字 · Ctrl+G 译")
         elif self._width >= 108:
             bits.append("[dim]Ctrl+拖选译 · Ctrl+T 全篇[/dim]")
+        if self._mirror_side:
+            bits.append("[dim]对照→{}{}[/dim]".format(
+                "左" if self._mirror_side == "left" else "右",
+                "" if self._mirror_exact else "≈",
+            ))
         if not self.auto_popup:
             bits.append("[dim]Ctrl+拖选 关[/dim]")
         if self._busy:
@@ -826,7 +858,8 @@ class Linguatui(App[None]):
     def mirror_selection(self, pane: TextArea) -> None:
         """Highlight the part of the other pane that matches the selection.
 
-        粗→细三层：段落对段落 → 句对句（两边句数一致时）→ 句内按比例定位到词。
+        段落 → 句子 → 词，逐层细化；两栏段落数不一致时也会先猜出对应段落，
+        再在该段内部做细粒度定位（而不是只点亮整段）。
         """
         if not self.sync_selection:
             return
@@ -841,62 +874,64 @@ class Linguatui(App[None]):
             return
 
         start_loc, end_loc = pane.selection
-        rows = sorted((start_loc[0], end_loc[0]))
-        first = self._block_index(source_blocks, rows[0])
-        last = self._block_index(source_blocks, rows[1])
+        first = self._block_index(source_blocks, min(start_loc[0], end_loc[0]))
+        last = self._block_index(source_blocks, max(start_loc[0], end_loc[0]))
         first = first if first is not None else last
         last = last if last is not None else first
         if first is None or last is None:
             self._clear_mirror()
             return
 
+        source_lines = source_text.split("\n")
         target_lines = target_text.split("\n")
-        same_shape = len(source_blocks) == len(target_blocks)
-        if not same_shape:
-            # 段落数对不上：按整篇相对位置粗略对应（相差太悬殊就不猜）
-            ratio = len(source_blocks) / len(target_blocks)
-            if not 0.5 <= ratio <= 2.0:
-                self._clear_mirror()
-                return
-            guess = min(
-                len(target_blocks) - 1,
-                max(0, int((first + 0.5) / len(source_blocks) * len(target_blocks))),
+        exact = len(source_blocks) == len(target_blocks)
+        if exact:
+            target_first, target_last = first, last
+        else:
+            # 段落数对不上：按“字符累计位置”猜对应段（比按条数比例稳），逐个端点都猜
+            target_first = self._guess_block(
+                source_blocks, source_lines, target_blocks, target_lines, first
             )
-            begin, finish = target_blocks[guess]
-            self._set_mirror(
-                other, Selection((begin, 0), (finish, len(target_lines[finish])))
+            target_last = (
+                target_first
+                if last == first
+                else max(
+                    target_first,
+                    self._guess_block(
+                        source_blocks, source_lines, target_blocks, target_lines, last
+                    ),
+                )
             )
-            return
 
-        if first != last:  # 跨段：整段对整段
-            begin = target_blocks[first][0]
-            finish = target_blocks[last][1]
+        if first != last:  # 跨段：整段区间对整段区间
+            begin = target_blocks[target_first][0]
+            finish = target_blocks[target_last][1]
             self._set_mirror(
-                other, Selection((begin, 0), (finish, len(target_lines[finish])))
+                other, Selection((begin, 0), (finish, len(target_lines[finish]))), exact
             )
             return
 
         source_first, source_last = source_blocks[first]
-        target_first, target_last = target_blocks[first]
+        target_first, target_last = target_blocks[target_first]
         whole = Selection(
             (target_first, 0), (target_last, len(target_lines[target_last]))
         )
         if tuple(start_loc) == tuple(end_loc):  # 光标/段落模式：整段
-            self._set_mirror(other, whole)
+            self._set_mirror(other, whole, exact)
             return
 
-        source_lines = source_text.split("\n")
         source_block = "\n".join(source_lines[source_first : source_last + 1])
         target_block = "\n".join(target_lines[target_first : target_last + 1])
         offset_start = _flat_offset(source_lines, source_first, start_loc)
         offset_end = _flat_offset(source_lines, source_first, end_loc)
         offset_start, offset_end = sorted((offset_start, offset_end))
         if offset_end - offset_start >= 0.8 * max(1, len(source_block)):
-            self._set_mirror(other, whole)  # 基本选中了整段
+            self._set_mirror(other, whole, exact)  # 基本选中了整段
             return
         target_start, target_end = _map_offsets(
             source_block, target_block, offset_start, offset_end
         )
+        target_start, target_end = _dilate_to_clause(target_block, target_start, target_end)
         target_start, target_end = _word_span(target_block, target_start, target_end)
         self._set_mirror(
             other,
@@ -904,6 +939,7 @@ class Linguatui(App[None]):
                 _loc_from_offset(target_lines, target_first, target_last, target_start),
                 _loc_from_offset(target_lines, target_first, target_last, target_end),
             ),
+            exact,
         )
 
     @staticmethod
@@ -913,20 +949,47 @@ class Linguatui(App[None]):
                 return index
         return None
 
-    def _set_mirror(self, target: TextArea, span: Selection) -> None:
+    @staticmethod
+    def _guess_block(
+        source_blocks: list[tuple[int, int]],
+        source_lines: list[str],
+        target_blocks: list[tuple[int, int]],
+        target_lines: list[str],
+        index: int,
+    ) -> int:
+        """Find the target block sitting at the same relative position in the document."""
+        source_total = max(1, sum(len(line) + 1 for line in source_lines))
+        target_total = max(1, sum(len(line) + 1 for line in target_lines))
+        wanted = _flat_offset(source_lines, 0, (source_blocks[index][0], 0)) / source_total
+        best_index, best_delta = 0, None
+        for candidate, (begin, _finish) in enumerate(target_blocks):
+            position = _flat_offset(target_lines, 0, (begin, 0)) / target_total
+            delta = abs(position - wanted)
+            if best_delta is None or delta < best_delta:
+                best_index, best_delta = candidate, delta
+        return best_index
+
+    def _set_mirror(self, target: TextArea, span: Selection, exact: bool = True) -> None:
         self._mirror_side = self._side_of(target)
+        self._mirror_exact = exact
         target.selection = span
+        self._sync_status()
 
     def _clear_mirror(self) -> None:
+        if self._mirror_timer is not None:
+            self._mirror_timer.stop()
+            self._mirror_timer = None
         if self._mirror_side is None:
             return
         side, self._mirror_side = self._mirror_side, None
+        self._mirror_exact = True
         try:
             pane = self.ta(side)
             if tuple(pane.selection.start) != tuple(pane.selection.end):
                 pane.selection = Selection.cursor(pane.selection.end)
         except Exception:
             pass
+        self._sync_status()
 
     # -- events ------------------------------------------------------------
     def on_resize(self, event) -> None:
@@ -1017,6 +1080,22 @@ class Linguatui(App[None]):
     @on(TextArea.SelectionChanged)
     def _on_selection_changed(self, event: TextArea.SelectionChanged) -> None:
         self._sync_status()
+        pane = event.text_area
+        if isinstance(self.screen, ModalScreen):
+            return
+        if self._side_of(pane) == self._mirror_side:
+            return  # 这是我们自己写进去的对照选区，不要再反射回去
+        if not pane.selected_text.strip():
+            return
+        # 键盘选中（Shift+方向键）同样给出对照，防抖一点避免逐字触发
+        if self._mirror_timer is not None:
+            self._mirror_timer.stop()
+        self._mirror_timer = self.set_timer(0.35, lambda: self._mirror_if_selected(pane))
+
+    def _mirror_if_selected(self, pane: TextArea) -> None:
+        self._mirror_timer = None
+        if pane.selected_text.strip():
+            self.mirror_selection(pane)
 
     @on(TranslatePane.Settled)
     def _on_selection_settled(self, event: TranslatePane.Settled) -> None:
