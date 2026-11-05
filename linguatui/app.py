@@ -31,7 +31,8 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 from textual.widgets.text_area import Selection
 
-from . import __version__, backends, clipboard, config, langs
+from . import __version__, aligner as align_mod
+from . import backends, clipboard, config, langs
 
 SIDES = ("left", "right")
 SIDE_CN = {"left": "左栏", "right": "右栏"}
@@ -345,6 +346,9 @@ HELP_MD = """
 * 方向永远指向另一栏的语言：右栏选英文，小窗里就是中文。
 
 对齐是分层的：段落（空行）→ 句子（。！？；.!?）→ 句内按比例定位（有 3.5%、[4] 这类两边相同的 token 就锚定它）→ 再扩到完整单词和包含它的分句。
+
+想真正精确到词：按 `F4` 切到「词对齐模型」（需要 `pip install -e ".[align]"`，首次会下载
+约 700MB 的多语言 BERT）。它会先用启发式给个大致范围，模型算完后把高亮收窄到真正的词。
 所以即使比例算差一两个词，高亮也一定覆盖到正确的分句（英文没逗号时就是整句），不会只点亮隔壁半句。
 两栏段落数不一致时会退化成“按整篇相对位置找段”；改动任一栏文字或点击别处，高亮自动清除。
 
@@ -372,6 +376,7 @@ HELP_MD = """
 | `Ctrl+P` | 切换翻译引擎 |
 | `F2` | 开 / 关 `Ctrl+拖拽` 弹窗 |
 | `F3` | 开 / 关“另一栏高亮对应段落” |
+| `F4` | 对齐方式：启发式 ⇄ 词对齐模型 |
 | `Ctrl+Z` / `Ctrl+Y` | 撤销 / 重做本栏编辑 |
 | `F1` | 本帮助 |
 | `Ctrl+Q` | 退出 |
@@ -674,6 +679,7 @@ class Linguatui(App[None]):
         Binding("ctrl+p", "pick_provider", "引擎", priority=True),
         Binding("f2", "toggle_auto_popup", "自动弹窗", show=False),
         Binding("f3", "toggle_sync", "对照选中", show=False),
+        Binding("f4", "toggle_align", "对齐方式", show=False),
         Binding("f1", "help", "帮助", priority=True),
         Binding("ctrl+q", "quit", "退出", priority=True),
     ]
@@ -698,6 +704,11 @@ class Linguatui(App[None]):
         self._programmatic: dict[str, str] = {}
         self._live_last: dict[str, tuple[str, str]] = {}
         self.sync_selection = self.cfg.sync_selection
+        self.align_mode = self.cfg.align if self.cfg.align in {"heuristic", "model"} else "heuristic"
+        self._aligner_obj: align_mod.WordAligner | None = None
+        self._align_cache: dict[tuple[str, str], list] = {}
+        self._align_token = 0
+        self._align_notified = False
         self._mirror_side: str | None = None
         self._mirror_exact = True
         self._mirror_timer = None
@@ -820,6 +831,7 @@ class Linguatui(App[None]):
         self.cfg.right_lang = self.sides["right"]
         self.cfg.auto_popup = self.auto_popup
         self.cfg.sync_selection = self.sync_selection
+        self.cfg.align = self.align_mode
         self.cfg.live = self.live_mode
         if self.cfg.remember_text:
             self.cfg.left_text = self._texts["left"]
@@ -871,6 +883,8 @@ class Linguatui(App[None]):
                 "左" if self._mirror_side == "left" else "右",
                 "" if self._mirror_exact else "≈",
             ))
+        if self.align_mode == "model":
+            bits.append("[green]对齐 模型[/green]")
         if not self.auto_popup:
             bits.append("[dim]Ctrl+拖选 关[/dim]")
         if self._busy:
@@ -988,6 +1002,125 @@ class Linguatui(App[None]):
                 _loc_from_offset(target_lines, target_first, target_last, target_end),
             ),
             exact,
+        )
+        self._refine_with_model(
+            side,
+            source_block,
+            target_block,
+            offset_start,
+            offset_end,
+            target_first,
+            target_last,
+        )
+
+    # -- 词对齐模型（可选，align = "model"） ------------------------------
+    def _refine_with_model(
+        self,
+        side: str,
+        source_block: str,
+        target_block: str,
+        selection_start: int,
+        selection_end: int,
+        target_first: int,
+        target_last: int,
+    ) -> None:
+        """启发式先出结果，再用词对齐模型把范围收窄到真正的词。"""
+        if self.align_mode != "model":
+            return
+        self._align_token += 1
+        token = self._align_token
+        other_side = self._other(side)
+        cached = self._align_cache.get((source_block, target_block))
+        if cached is not None:
+            self._apply_alignment(cached, other_side, target_block, selection_start, selection_end, target_first, target_last)
+            return
+        self._alignment_worker(
+            other_side,
+            source_block,
+            target_block,
+            selection_start,
+            selection_end,
+            target_first,
+            target_last,
+            token,
+        )
+
+    @work(exclusive=True, group="align", exit_on_error=False)
+    async def _alignment_worker(
+        self,
+        other_side: str,
+        source_block: str,
+        target_block: str,
+        selection_start: int,
+        selection_end: int,
+        target_first: int,
+        target_last: int,
+        token: int,
+    ) -> None:
+        aligner = self._aligner_obj
+        if aligner is None:
+            aligner = align_mod.WordAligner(self.cfg.align_model)
+            self._aligner_obj = aligner
+        try:
+            if not aligner.loaded and not self._align_notified:
+                self._align_notified = True
+                self.notify(
+                    "正在加载词对齐模型（首次会下载约 700MB）…",
+                    title="词对齐",
+                    timeout=10,
+                )
+            pairs = await asyncio.to_thread(aligner.pairs, source_block, target_block)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.align_mode = "heuristic"
+            self._save_config()
+            self._sync_status()
+            self.notify(
+                f"词对齐失败，已回退到启发式：{exc}",
+                title="词对齐",
+                severity="warning",
+                timeout=12,
+            )
+            return
+        if token != self._align_token or self.align_mode != "model":
+            return
+        if len(self._align_cache) > 64:  # 边输入边翻译时块文本会不停变，别无限涨
+            self._align_cache.clear()
+        self._align_cache[(source_block, target_block)] = pairs
+        if pairs:
+            self._apply_alignment(
+                pairs, other_side, target_block, selection_start, selection_end, target_first, target_last
+            )
+
+    def _apply_alignment(
+        self,
+        pairs: list,
+        other_side: str,
+        target_block: str,
+        selection_start: int,
+        selection_end: int,
+        target_first: int,
+        target_last: int,
+    ) -> None:
+        span = align_mod.span_from_pairs(pairs, selection_start, selection_end)
+        if span is None:
+            return
+        span = align_mod.expand_to_word(target_block, span[0], span[1])
+        try:
+            other = self.ta(other_side)
+        except Exception:
+            return
+        lines = other.text.split("\n")
+        if "\n".join(lines[target_first : target_last + 1]) != target_block:
+            return  # 目标栏已经改过了，丢弃过期结果
+        self._set_mirror(
+            other,
+            Selection(
+                _loc_from_offset(lines, target_first, target_last, span[0]),
+                _loc_from_offset(lines, target_first, target_last, span[1]),
+            ),
+            True,
         )
 
     @staticmethod
@@ -1142,7 +1275,7 @@ class Linguatui(App[None]):
 
     def _mirror_if_selected(self, pane: TextArea) -> None:
         self._mirror_timer = None
-        if pane.selected_text.strip():
+        if pane.has_focus and pane.selected_text.strip():
             self.mirror_selection(pane)
 
     @on(TranslatePane.Settled)
@@ -1345,6 +1478,26 @@ class Linguatui(App[None]):
             pane = self._focused_text_area()
             self.mirror_selection(pane)
             self.open_selection_popup(pane)
+
+    def action_toggle_align(self) -> None:
+        """F4：启发式 ⇄ 词对齐模型。"""
+        if self._modal_open():
+            return
+        if self.align_mode == "model":
+            self.align_mode = "heuristic"
+            self.notify("对照对齐：启发式（块/句/分句，快）", timeout=3)
+        else:
+            reason = align_mod.missing_dependencies()
+            if reason:
+                self.notify(reason, title="词对齐不可用", severity="warning", timeout=14)
+                return
+            self.align_mode = "model"
+            self.notify(
+                "对照对齐：词对齐模型（BERT，首次会下载模型；启发式结果会再被收窄到具体词）",
+                timeout=6,
+            )
+        self._save_config()
+        self._sync_status()
 
     def action_toggle_sync(self) -> None:
         if self._modal_open():

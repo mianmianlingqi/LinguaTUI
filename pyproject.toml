@@ -34,6 +34,9 @@ dependencies = [
     "rich>=13.0",
 ]
 
+[project.optional-dependencies]
+align = ["torch>=2.2", "transformers>=4.40"]
+
 [project.urls]
 Homepage = "https://github.com/mianmianlingqi/LinguaTUI"
 Repository = "https://github.com/mianmianlingqi/LinguaTUI"

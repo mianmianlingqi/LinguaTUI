@@ -50,6 +50,14 @@ python -m linguatui
 
 需要 Python 3.10+。推荐 Windows Terminal（鼠标拖选、中文显示都正常）。
 
+想要**词级**对照高亮，再装可选依赖（多语言 BERT，一次性下载约 700MB）：
+
+```bat
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install transformers
+:: 或者： pip install -e ".[align]"
+```
+
 ## 用法
 
 ### ① 输入即译（默认开启）
@@ -74,6 +82,14 @@ python -m linguatui
 2. 句子层：两边句数一致时，先锚定到同一句（中文 `。！？；` / 英文 `.!?` 都算句末）；
 3. 词层：句内按字符比例定位，首尾扩到完整单词；若选中内容里有**两边写法相同**的 token（`3.5%`、`Qwen3.5-0.8B`、`[4]` 这类），就以它为锚点平移对齐——这是唯一能真正"精确"的部分；
 4. 分句兜底：若定位结果跨了逗号，就扩到「包含它的分句」；英文没逗号时退化成整句。保证高亮一定覆盖对应内容，不会只点亮隔壁半句。
+
+**按 `F4` 切到「词对齐模型」** 就是真正的词级了：用多语言 BERT 的上下文向量做 IterMax 对齐
+（SimAlign 思路），每对句子约 0.1–0.2 秒，结果会缓存。启发式先出结果，模型算完再把范围收窄到词：
+
+```
+启发式：ROME 等模型编辑方法 → "The approach also differs from model editing methods such as ROME, which use a"
+模型　：ROME 等模型编辑方法 → "model editing methods such as ROME"
+```
 
 实测（中→英，`python tests/align_bench.py` 给出 8/9 命中）：
 
@@ -115,6 +131,7 @@ python -m linguatui
 | `Ctrl+P` | 切换翻译引擎 |
 | `F2` | 开 / 关 `Ctrl+拖拽` 弹窗 |
 | `F3` | 开 / 关“另一栏高亮对应段落” |
+| `F4` | 对齐方式：启发式 ⇄ 词对齐模型 |
 | `Ctrl+Z` / `Ctrl+Y` | 撤销 / 重做本栏编辑 |
 | `F1` | 帮助 |
 | `Ctrl+Q` | 退出 |
@@ -160,6 +177,8 @@ left_lang = "zh-CN"
 right_lang = "en"
 auto_popup = true
 sync_selection = true    # 普通拖选后在另一栏高亮对应段落
+align = "heuristic"      # "heuristic" 或 "model"（词对齐模型，需 .[align]）
+align_model = "bert-base-multilingual-cased"
 live = "left"            # 输入即译方向："off" / "left" / "right"
 remember_text = false    # 改成 true 则下次启动恢复两栏正文
 deepl_key = ""
@@ -185,7 +204,7 @@ python -m linguatui --left-lang ja --right-lang zh-CN --provider deepl
 python tests\smoke.py
 ```
 
-无头启动真实的 App（`App.run_test`）并打真实网络请求，跑通 55 项：输入即译、Ctrl+R 方向循环、
+无头启动真实的 App（`App.run_test`）并打真实网络请求，跑通 58 项：输入即译、Ctrl+R 方向循环、
 拖选对照（另一栏高亮对应段落）、Ctrl+拖选弹窗、替换、Ctrl+G 段落翻译、全文翻译、反向翻译、交换、语言/引擎选择器、帮助、
 键盘选中、插入另一栏、缓存命中、窄窗口布局、长文本、缺 key 提示、配置往返。
 渲染结果写到 `tests/_screen_*.txt`，README 顶部那张图由 `tests/make_readme_screenshot.py` 生成。
@@ -193,7 +212,9 @@ python tests\smoke.py
 另有一组对照对齐的质量基准，改算法前后跑一下防止退化：
 
 ```bat
-python testslign_bench.py     :: 命中 8/9
+python testslign_bench.py             :: 启发式，命中 8/9
+python testslign_bench.py --model     :: 词对齐模型，命中 9/9，范围精确到词
+LINGUA_TEST_ALIGN=1 python tests\smoke.py   :: 额外跑模型集成测试（会加载模型）
 ```
 
 ## 命令行自检之外
@@ -209,6 +230,7 @@ linguatui --left-lang ja --right-lang zh-CN
 linguatui/
   app.py         Textual 界面：双栏 TextArea、输入即译、拖选弹窗、选择器、帮助
   backends.py    4 个翻译引擎 + 分块/重试/缓存（保持换行）
+  aligner.py     可选：多语言 BERT 词对齐（IterMax，按需懒加载）
   langs.py       52 种语言表 + 别名归一化（zh/cn/jp…）
   config.py      config.toml 读写 + 环境变量覆盖
   clipboard.py   Win32 ctypes / pbcopy / wl-copy / OSC52

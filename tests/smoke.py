@@ -6,6 +6,7 @@ Run:  python tests/smoke.py
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -26,6 +27,7 @@ def dump_screen(app) -> str:
 
 async def main() -> int:
     cfg = config.load()
+    cfg.align = "heuristic"
     cfg.left_lang, cfg.right_lang = "zh-CN", "en"
     cfg.provider = "google"
     cfg.remember_text = False
@@ -270,6 +272,7 @@ async def main() -> int:
 
     # 17. an engine without a key explains itself instead of hanging
     cfg_plain = config.load()
+    cfg_plain.align = "heuristic"
     cfg_plain.provider = "deepl"
     cfg_plain.deepl_key = ""
     app2 = Linguatui(cfg_plain)
@@ -291,6 +294,7 @@ async def main() -> int:
 
     # 18. remember_text round trip
     cfg_mem = config.load()
+    cfg_mem.align = "heuristic"
     cfg_mem.remember_text = True
     cfg_mem.auto_popup = False
     app3 = Linguatui(cfg_mem)
@@ -298,6 +302,7 @@ async def main() -> int:
         app3.query_one("#ta-left", TextArea).load_text("记住我：下次还在")
         await pilot.pause()
     saved = config.load()
+    saved.align = "heuristic"
     check(saved.remember_text and saved.left_text == "记住我：下次还在", "退出时保存正文")
     app4 = Linguatui(saved)
     async with app4.run_test(size=(100, 30)) as pilot:
@@ -305,6 +310,7 @@ async def main() -> int:
         check(restored == "记住我：下次还在", f"再次启动恢复正文 -> {restored!r}")
     # 19. 输入即译：只打字，另一栏自动出译文
     cfg_live = config.load()
+    cfg_live.align = "heuristic"
     cfg_live.left_lang, cfg_live.right_lang = "zh-CN", "en"
     cfg_live.provider = "google"
     cfg_live.live = "left"
@@ -365,6 +371,7 @@ async def main() -> int:
 
     # 22. 普通拖选 -> 另一边高亮对应段落
     cfg_sync = config.load()
+    cfg_sync.align = "heuristic"
     cfg_sync.left_lang, cfg_sync.right_lang = "zh-CN", "en"
     cfg_sync.live = "off"
     cfg_sync.auto_popup = True
@@ -430,6 +437,7 @@ async def main() -> int:
             f"跨两行的段落地图 {sel3}",
         )
 
+        await pilot.pause(0.6)  # 让键盘选中的防抖计时器先落地
         await pilot.mouse_down("#ta-right", offset=doc_offset(rt, 1, 0))
         await pilot.mouse_up("#ta-right", offset=doc_offset(rt, 1, 0))
         await pilot.pause(0.3)
@@ -491,15 +499,25 @@ async def main() -> int:
 
     # leave the user's config tidy
     clean = config.load()
+    clean.align = "heuristic"
     clean.remember_text = False
     clean.left_text = ""
     clean.right_text = ""
     clean.provider = "google"
+    clean.align = "heuristic"
     clean.auto_popup = True
     clean.live = "left"
     config.save(clean)
 
-    # 23. 对齐算法（纯函数）单测
+    # 23. 词对齐的区间映射（纯函数）
+    from linguatui.aligner import span_from_pairs
+
+    fake_pairs = [((0, 3), (0, 4)), ((3, 6), (5, 11)), ((6, 9), (12, 18))]
+    check(span_from_pairs(fake_pairs, 0, 3) == (0, 4), "词对齐：首词 -> 首词")
+    check(span_from_pairs(fake_pairs, 3, 9) == (5, 18), "词对齐：跨词 -> 起止合并")
+    check(span_from_pairs(fake_pairs, 100, 120) is None, "词对齐：选不中任何词 -> None")
+
+    # 24. 对齐算法（纯函数）单测
     from linguatui.app import _loc_from_offset, _map_offsets, _sentence_spans, _word_span
 
     check(len(_sentence_spans("One. Two! Three?")) == 3, "切句：英文三句")
@@ -514,6 +532,61 @@ async def main() -> int:
         _loc_from_offset(["abc", "def"], 0, 1, 5) == (1, 1),
         f"偏移转行列 -> {_loc_from_offset(['abc', 'def'], 0, 1, 5)}",
     )
+
+    # 25. 词对齐模型（需要依赖 + 模型；默认跳过，避免 CI 下载 700MB）
+    from linguatui.aligner import missing_dependencies
+
+    if os.environ.get("LINGUA_TEST_ALIGN") == "1" and missing_dependencies() is None:
+        cfg7 = config.load()
+        cfg7.align = "heuristic"
+        cfg7.left_lang, cfg7.right_lang = "zh-CN", "en"
+        cfg7.live = "off"
+        cfg7.auto_popup = False
+        cfg7.sync_selection = True
+        cfg7.align = "model"
+        cfg7.remember_text = False
+        app7 = Linguatui(cfg7)
+        cn = "该方法也不同于 ROME 等模型编辑方法，后者使用固定算法进行狭窄的更改，例如更新单个事实。"
+        en = (
+            "The approach also differs from model editing methods such as ROME, which use a "
+            "fixed algorithm to make narrow changes like updating a single fact."
+        )
+        async with app7.run_test(size=(150, 24)) as pilot:
+            lt7 = app7.query_one("#ta-left", TextArea)
+            rt7 = app7.query_one("#ta-right", TextArea)
+            lt7.load_text(cn)
+            rt7.load_text(en)
+            lt7.focus()
+            await pilot.pause()
+            term = "ROME 等模型编辑方法"
+            start = cn.index(term)
+            lt7.selection = Selection((0, start), (0, start + len(term)))
+            app7.mirror_selection(lt7)
+            for _ in range(200):
+                await pilot.pause(0.2)
+                if rt7.selected_text.strip() == "model editing methods such as ROME":
+                    break
+            check(
+                rt7.selected_text.strip() == "model editing methods such as ROME",
+                f"词对齐模型：词级精确定位 -> {rt7.selected_text!r}",
+            )
+            term2 = "数千"
+            lt7.load_text("评论员指出，大多数实验使用的网络只有数千个权重。")
+            rt7.load_text("Commentators noted that most experiments used networks with only thousands of weights.")
+            await pilot.pause()
+            start2 = lt7.text.index("数千个权重")
+            lt7.selection = Selection((0, start2), (0, start2 + 5))
+            app7.mirror_selection(lt7)
+            for _ in range(200):
+                await pilot.pause(0.2)
+                if "thousands" in rt7.selected_text:
+                    break
+            check(
+                "thousands of weights" in rt7.selected_text,
+                f"词对齐模型：完整单词边界 -> {rt7.selected_text!r}",
+            )
+    else:
+        print("  skip 词对齐模型集成测试（LINGUA_TEST_ALIGN=1 且装好 .[align] 后才跑）")
 
     print()
     if failures:

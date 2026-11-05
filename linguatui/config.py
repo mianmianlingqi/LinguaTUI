@@ -26,6 +26,8 @@ class Config:
     right_lang: str = "en"
     auto_popup: bool = True
     sync_selection: bool = True  # 普通拖选后，在另一栏高亮对应段落
+    align: str = "heuristic"  # "heuristic" | "model"
+    align_model: str = "bert-base-multilingual-cased"
     live: str = "left"  # "off" | "left" | "right" —— 边输入边翻译的方向
     remember_text: bool = False
     left_text: str = ""
