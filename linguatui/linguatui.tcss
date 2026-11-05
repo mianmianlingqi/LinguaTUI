@@ -1,0 +1,194 @@
+Screen {
+    background: $surface;
+}
+
+Header {
+    background: $panel;
+    color: $text;
+}
+
+/* ------------------------------------------------------------------ panes */
+
+#panes {
+    height: 1fr;
+    padding: 0 1;
+}
+
+.pane {
+    width: 1fr;
+    height: 100%;
+    border: round $primary-darken-2;
+    background: $surface;
+    padding: 0 1;
+}
+
+.pane:focus-within {
+    border: round $accent;
+}
+
+.pane-title {
+    height: 1;
+    color: $text-muted;
+}
+
+#title-left {
+    color: $text-muted;
+}
+
+TextArea {
+    height: 1fr;
+    border: none;
+    padding: 0;
+    background: $surface;
+}
+
+/* ----------------------------------------------------------------- status */
+
+#status {
+    height: 1;
+    background: $panel;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+/* -------------------------------------------------------------- selection */
+
+SelectionScreen {
+    align: center middle;
+    background: $background 55%;
+}
+
+#dialog {
+    width: 70%;
+    min-width: 44;
+    max-width: 100;
+    height: auto;
+    max-height: 92%;
+    border: round $accent;
+    background: $panel;
+    padding: 1 2;
+}
+
+#dlg-title {
+    height: 1;
+    text-style: bold;
+}
+
+#dlg-meta {
+    height: 1;
+}
+
+.muted {
+    color: $text-muted;
+}
+
+.section-label {
+    height: 1;
+    margin-top: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#dlg-source-box {
+    height: auto;
+    max-height: 5;
+    background: $boost;
+    padding: 0 1;
+}
+
+#dlg-source {
+    color: $text-muted;
+}
+
+#dlg-target-box {
+    height: auto;
+    max-height: 9;
+    background: $primary 25%;
+    padding: 0 1;
+}
+
+#dlg-loading {
+    height: 1;
+    color: $accent;
+}
+
+#dlg-buttons {
+    height: 3;
+    margin-top: 1;
+    align: right middle;
+}
+
+#dlg-buttons Button {
+    margin-left: 1;
+    min-width: 9;
+    width: auto;
+    padding: 0 1;
+}
+
+/* ------------------------------------------------------------ pickers */
+
+PickerScreen {
+    align: center middle;
+    background: $background 55%;
+}
+
+#picker {
+    width: 68;
+    max-width: 92%;
+    height: 76%;
+    border: round $accent;
+    background: $panel;
+    padding: 1 1;
+}
+
+#picker-title {
+    height: auto;
+    padding: 0 1;
+}
+
+#picker-input {
+    margin: 1 0;
+}
+
+#picker-list {
+    height: 1fr;
+    background: $surface;
+    border: none;
+}
+
+/* --------------------------------------------------------------- help */
+
+HelpScreen {
+    align: center middle;
+    background: $background 55%;
+}
+
+#help {
+    width: 92;
+    max-width: 94%;
+    height: 86%;
+    border: round $accent;
+    background: $panel;
+    padding: 0 2;
+}
+
+#help-title {
+    height: 1;
+    padding: 1 0 0 0;
+}
+
+#help-body {
+    height: 1fr;
+    padding: 1 0;
+}
+
+/* ----------------------------------------------------------- responsive */
+
+#panes.-narrow {
+    layout: vertical;
+}
+
+#panes.-narrow .pane {
+    width: 100%;
+    height: 1fr;
+}

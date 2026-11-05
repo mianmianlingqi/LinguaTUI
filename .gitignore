@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+tests/_screen_*.txt
+.pytest_cache/
+tests/_*.txt

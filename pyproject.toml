@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linguatui"
+version = "0.1.0"
+description = "双栏、拖选即译的终端翻译器（Textual TUI）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "mianmianlingqi" }]
+keywords = ["tui", "terminal", "translation", "translator", "textual", "i18n", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Chinese (Simplified)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+dependencies = [
+    "textual>=1.0",
+    "httpx>=0.27",
+    "platformdirs>=4.0",
+    "rich>=13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/mianmianlingqi/LinguaTUI"
+Repository = "https://github.com/mianmianlingqi/LinguaTUI"
+Issues = "https://github.com/mianmianlingqi/LinguaTUI/issues"
+
+[project.scripts]
+linguatui = "linguatui.app:main"
+
+[tool.setuptools]
+packages = ["linguatui"]
+
+[tool.setuptools.package-data]
+linguatui = ["*.tcss"]
