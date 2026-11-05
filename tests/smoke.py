@@ -385,10 +385,10 @@ async def main() -> int:
         await pilot.hover("#ta-left", offset=doc_offset(lt, 0, 6))
         await pilot.mouse_up("#ta-left", offset=doc_offset(lt, 0, 6))
         await pilot.pause(0.4)
-        sel = rt.selection
         check(
-            tuple(sel.start) == (0, 0) and tuple(sel.end)[0] == 1,
-            f"选第一段 -> 右栏高亮第一段 {sel}",
+            rt.selected_text.strip().startswith("Para 1a")
+            and "Para 1b" not in rt.selected_text,
+            f"选第一句 -> 右栏只高亮对应那句 {rt.selected_text!r}",
         )
         check(app6._mirror_side == "right", f"高亮落在右栏 -> {app6._mirror_side}")
         check(not isinstance(app6.screen, SelectionScreen), "普通拖选仍然不弹窗")
@@ -401,6 +401,24 @@ async def main() -> int:
         check(
             tuple(sel2.start)[0] == 3 and tuple(sel2.end)[0] == 3,
             f"选第二段 -> 右栏第二段 {sel2}",
+        )
+
+        # 句级锚定：源栏第二句 -> 目标栏第二句
+        lt.selection = Selection((1, 0), (1, 5))
+        app6.mirror_selection(lt)
+        await pilot.pause(0.2)
+        check(
+            rt.selected_text.strip() == "Para 1b.",
+            f"句对句锚定 -> {rt.selected_text!r}",
+        )
+
+        # 反向 + 词级：右栏只选 4 个字母 -> 左栏只高亮对应的几个字
+        rt.selection = Selection((3, 0), (3, 4))
+        app6.mirror_selection(rt)
+        await pilot.pause(0.2)
+        check(
+            lt.selected_text.strip() == "第二段",
+            f"英文小段 -> 中文只高亮对应词 {lt.selected_text!r}",
         )
 
         lt.selection = Selection((5, 0), (6, 3))
@@ -444,6 +462,22 @@ async def main() -> int:
     clean.auto_popup = True
     clean.live = "left"
     config.save(clean)
+
+    # 23. 对齐算法（纯函数）单测
+    from linguatui.app import _loc_from_offset, _map_offsets, _sentence_spans, _word_span
+
+    check(len(_sentence_spans("One. Two! Three?")) == 3, "切句：英文三句")
+    check(len(_sentence_spans("第一句。第二句！第三句？")) == 3, "切句：中文三句")
+    check(_sentence_spans("no terminator") == [(0, 13)], "切句：无标点时整段一句")
+    pos = "甲。乙。丙。".index("乙。")
+    mapped = _map_offsets("甲。乙。丙。", "Aaa. Bbb. Ccc.", pos, pos + 2)
+    check(mapped == (5, 9), f"句对句：第二句 -> 第二句 {mapped}")
+    start, end = _word_span("See also explainable AI.", 4, 7)
+    check("See also explainable AI."[start:end] == "also", f"词边界收拢 -> {'See also explainable AI.'[start:end]!r}")
+    check(
+        _loc_from_offset(["abc", "def"], 0, 1, 5) == (1, 1),
+        f"偏移转行列 -> {_loc_from_offset(['abc', 'def'], 0, 1, 5)}",
+    )
 
     print()
     if failures:

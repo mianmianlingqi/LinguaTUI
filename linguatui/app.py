@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sys
 from typing import Sequence
 
@@ -337,14 +338,14 @@ HELP_MD = """
 
 **② 对照选中 + Ctrl+拖选即译**
 
-* **普通拖拽**：只选字、不弹窗；**松开后另一栏会高亮对应段落**，一眼看清哪句对应哪句译文（`F3` 开关）；
+* **普通拖拽**：只选字、不弹窗；**松开后另一栏会高亮对应位置** —— 先对齐段落、再对齐句子、最后在句内定位到词组（`F3` 开关）；
 * **Ctrl + 拖拽**：选中一段，**松手即弹出译文小窗**；
 * **Ctrl + 单击**（不拖）：直接翻译光标所在段落；
 * `a` 替换原文 / `i` 插入另一栏 / `c` 复制 / `r` 重译 / `Esc` 关闭；
 * 方向永远指向另一栏的语言：右栏选英文，小窗里就是中文。
 
-对照关系按“空行分段”对齐，两栏段落数一致时才能对上；输入即译 / `Ctrl+T` 产出的译文都保留这个结构。
-改动任一栏的文字或点击别处，对照高亮会自动清除。
+对齐是分层的：段落（空行）→ 句子（。！？；.!?）→ 句内按比例落到具体词组，并把边界扩到完整单词。
+两栏段落数不一致时会退化成“按整篇相对位置找段”；改动任一栏文字或点击别处，高亮自动清除。
 
 如果某个终端不上报鼠标事件的 Ctrl 修饰键，选中后按 `Ctrl+G`，效果一样。
 
@@ -472,6 +473,115 @@ class TranslatePane(TextArea):
         if not dragged and not ctrl:
             return  # 普通单击：不需要任何动作
         self.post_message(self.Settled(self, dragged, ctrl))
+
+
+# --------------------------------------------------------------------------- #
+# offset helpers (段落/句子/词的对齐)
+# --------------------------------------------------------------------------- #
+
+_SENTENCE_END = re.compile(r"[。！？；!?;]+[\"'”’）)\]]*\s*|\.(?=\s|$)\s*")
+
+
+def _sentence_spans(text: str) -> list[tuple[int, int]]:
+    """Sentence ranges inside a block, punctuation included."""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for match in _SENTENCE_END.finditer(text):
+        end = match.end()
+        if end > start:
+            spans.append((start, end))
+            start = end
+    if start < len(text):
+        spans.append((start, len(text)))
+    trimmed: list[tuple[int, int]] = []
+    for begin, end in spans:
+        while end > begin and text[end - 1].isspace():
+            end -= 1
+        if end > begin:
+            trimmed.append((begin, end))
+    return trimmed
+
+
+def _sentence_index(spans: list[tuple[int, int]], offset: int) -> int:
+    for index, (begin, end) in enumerate(spans):
+        if begin <= offset < end:
+            return index
+    if spans and offset >= spans[-1][1]:
+        return len(spans) - 1
+    return 0
+
+
+def _word_span(text: str, start: int, end: int) -> tuple[int, int]:
+    """Grow a character range out to whole ASCII words so it is readable."""
+    length = len(text)
+    start = max(0, min(start, length))
+    end = max(start, min(end, length))
+    if end - start < 2:
+        end = min(length, start + 2)
+    while start > 0 and text[start - 1].isascii() and text[start - 1].isalnum():
+        start -= 1
+    while end < length and text[end].isascii() and text[end].isalnum():
+        end += 1
+    return start, end
+
+
+def _map_offsets(src: str, tgt: str, start: int, end: int) -> tuple[int, int]:
+    """Map a character range of ``src`` onto ``tgt``.
+
+    两边句子数一致时先对到同一个句子，再在句内按比例定位；否则整段按比例。
+    """
+    if not tgt:
+        return 0, 0
+    start = max(0, min(start, len(src)))
+    end = max(start, min(end, len(src)))
+    src_sentences = _sentence_spans(src)
+    tgt_sentences = _sentence_spans(tgt)
+
+    if len(src_sentences) == len(tgt_sentences) > 1:
+        first = _sentence_index(src_sentences, start)
+        last = _sentence_index(src_sentences, max(start, end - 1))
+        src_begin, src_end = src_sentences[first]
+        tgt_begin, tgt_end = tgt_sentences[first]
+        head = tgt_begin + int(
+            (start - src_begin) / max(1, src_end - src_begin) * max(1, tgt_end - tgt_begin) + 0.5
+        )
+        if last > first:
+            tail = tgt_sentences[last][1]
+        else:
+            tail_begin, tail_end = src_sentences[last]
+            tgt_tail_begin, tgt_tail_end = tgt_sentences[last]
+            tail = tgt_tail_begin + int(
+                (min(end, tail_end) - tail_begin)
+                / max(1, tail_end - tail_begin)
+                * max(1, tgt_tail_end - tgt_tail_begin)
+                + 0.5
+            )
+        return head, max(tail, head + 1)
+
+    ratio_start = start / max(1, len(src))
+    ratio_end = max(ratio_start + 0.02, end / max(1, len(src)))
+    return int(ratio_start * len(tgt) + 0.5), int(ratio_end * len(tgt) + 0.5)
+
+
+def _flat_offset(lines: list[str], first_row: int, location: tuple[int, int]) -> int:
+    """Character offset of ``location`` relative to ``lines[first_row]``."""
+    row, column = location
+    offset = 0
+    for index in range(first_row, min(row, len(lines))):
+        offset += len(lines[index]) + 1
+    return offset + column
+
+
+def _loc_from_offset(
+    lines: list[str], first_row: int, last_row: int, offset: int
+) -> tuple[int, int]:
+    offset = max(0, offset)
+    for row in range(first_row, last_row + 1):
+        length = len(lines[row])
+        if offset <= length:
+            return (row, offset)
+        offset -= length + 1
+    return (last_row, len(lines[last_row]))
 
 
 # --------------------------------------------------------------------------- #
@@ -714,35 +824,94 @@ class Linguatui(App[None]):
         return blocks
 
     def mirror_selection(self, pane: TextArea) -> None:
-        """Highlight the paragraph in the other pane that matches the selection."""
+        """Highlight the part of the other pane that matches the selection.
+
+        粗→细三层：段落对段落 → 句对句（两边句数一致时）→ 句内按比例定位到词。
+        """
         if not self.sync_selection:
             return
         side = self._side_of(pane)
         other = self.ta(self._other(side))
-        source_blocks = self._blocks(pane.text)
-        target_blocks = self._blocks(other.text)
-        if not source_blocks or len(source_blocks) != len(target_blocks):
+        source_text = pane.text
+        target_text = other.text
+        source_blocks = self._blocks(source_text)
+        target_blocks = self._blocks(target_text)
+        if not source_blocks or not target_blocks:
             self._clear_mirror()
             return
 
-        start_row, end_row = pane.selection
-        rows = sorted((start_row[0], end_row[0]))
-        first = last = None
-        for index, (begin, finish) in enumerate(source_blocks):
-            if begin <= rows[0] <= finish:
-                first = index
-            if begin <= rows[1] <= finish:
-                last = index
+        start_loc, end_loc = pane.selection
+        rows = sorted((start_loc[0], end_loc[0]))
+        first = self._block_index(source_blocks, rows[0])
+        last = self._block_index(source_blocks, rows[1])
         first = first if first is not None else last
         last = last if last is not None else first
         if first is None or last is None:
             self._clear_mirror()
             return
 
-        begin = target_blocks[first][0]
-        finish = target_blocks[last][1]
-        lines = other.text.split("\n")
-        self._set_mirror(other, Selection((begin, 0), (finish, len(lines[finish]))))
+        target_lines = target_text.split("\n")
+        same_shape = len(source_blocks) == len(target_blocks)
+        if not same_shape:
+            # 段落数对不上：按整篇相对位置粗略对应（相差太悬殊就不猜）
+            ratio = len(source_blocks) / len(target_blocks)
+            if not 0.5 <= ratio <= 2.0:
+                self._clear_mirror()
+                return
+            guess = min(
+                len(target_blocks) - 1,
+                max(0, int((first + 0.5) / len(source_blocks) * len(target_blocks))),
+            )
+            begin, finish = target_blocks[guess]
+            self._set_mirror(
+                other, Selection((begin, 0), (finish, len(target_lines[finish])))
+            )
+            return
+
+        if first != last:  # 跨段：整段对整段
+            begin = target_blocks[first][0]
+            finish = target_blocks[last][1]
+            self._set_mirror(
+                other, Selection((begin, 0), (finish, len(target_lines[finish])))
+            )
+            return
+
+        source_first, source_last = source_blocks[first]
+        target_first, target_last = target_blocks[first]
+        whole = Selection(
+            (target_first, 0), (target_last, len(target_lines[target_last]))
+        )
+        if tuple(start_loc) == tuple(end_loc):  # 光标/段落模式：整段
+            self._set_mirror(other, whole)
+            return
+
+        source_lines = source_text.split("\n")
+        source_block = "\n".join(source_lines[source_first : source_last + 1])
+        target_block = "\n".join(target_lines[target_first : target_last + 1])
+        offset_start = _flat_offset(source_lines, source_first, start_loc)
+        offset_end = _flat_offset(source_lines, source_first, end_loc)
+        offset_start, offset_end = sorted((offset_start, offset_end))
+        if offset_end - offset_start >= 0.8 * max(1, len(source_block)):
+            self._set_mirror(other, whole)  # 基本选中了整段
+            return
+        target_start, target_end = _map_offsets(
+            source_block, target_block, offset_start, offset_end
+        )
+        target_start, target_end = _word_span(target_block, target_start, target_end)
+        self._set_mirror(
+            other,
+            Selection(
+                _loc_from_offset(target_lines, target_first, target_last, target_start),
+                _loc_from_offset(target_lines, target_first, target_last, target_end),
+            ),
+        )
+
+    @staticmethod
+    def _block_index(blocks: list[tuple[int, int]], row: int) -> int | None:
+        for index, (begin, finish) in enumerate(blocks):
+            if begin <= row <= finish:
+                return index
+        return None
 
     def _set_mirror(self, target: TextArea, span: Selection) -> None:
         self._mirror_side = self._side_of(target)
