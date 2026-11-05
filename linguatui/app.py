@@ -37,7 +37,9 @@ from . import backends, clipboard, config, langs
 SIDES = ("left", "right")
 SIDE_CN = {"left": "左栏", "right": "右栏"}
 LIVE_DELAY = 1.1  # seconds of "typing pause" before live translation fires
-LIVE_MAX = 3000  # don't auto-translate huge documents on every keystroke
+LONG_DOC = 3000  # 超过这个长度就改成“按段翻译 + 段落缓存”
+LIVE_MAX = 60000  # 再长就不自动翻了（避免把免费接口打爆）
+BLOCK_CONCURRENCY = 4  # 长文按段并发翻译的并发度
 
 # --------------------------------------------------------------------------- #
 # popup: translation of the selected paragraph
@@ -335,7 +337,7 @@ HELP_MD = """
 
 * 方向由 `Ctrl+R` 循环切换：`关 → 当前栏 → 另一栏 → 关`，状态栏会显示 `输入即译 左→右`；
 * 只会把「被编辑的那一栏」翻到另一栏，所以改译文不会被反向覆盖；
-* 正文超过 3000 字时会自动暂停（避免每敲一个字就发一次大请求），改用 `Ctrl+T`。
+* 长文（超过 3000 字）会自动切成段落并发翻译，且**只重译改动过的那段**，粘一整篇文章也能立刻看到译文。
 
 **② 对照选中 + Ctrl+拖选即译**
 
@@ -699,6 +701,7 @@ class Linguatui(App[None]):
         self._popup_pane: str = "left"
         self._popup_span: tuple | None = None
         self._busy = 0
+        self._progress = ""
         self._width = 0
         self._texts: dict[str, str] = {"left": "", "right": ""}
         self._programmatic: dict[str, str] = {}
@@ -888,7 +891,9 @@ class Linguatui(App[None]):
         if not self.auto_popup:
             bits.append("[dim]Ctrl+拖选 关[/dim]")
         if self._busy:
-            bits.append("[yellow]翻译中…[/yellow]")
+            bits.append(
+                f"[yellow]翻译中{' ' + self._progress if self._progress else '…'}[/yellow]"
+            )
         self.query_one("#status", Static).update("  ·  ".join(bits))
 
     def _set_busy(self, delta: int) -> None:
@@ -1216,6 +1221,7 @@ class Linguatui(App[None]):
                 timeout=5,
             )
             return
+
         source = self.sides[side]
         target = self.target_lang(side)
         if source != "auto" and source == target:
@@ -1223,6 +1229,48 @@ class Linguatui(App[None]):
         if self._live_last.get(side) == (text, target):
             return
         self._live_worker(side, text, source, target)
+
+    async def _translate_long(
+        self,
+        backend,
+        client,
+        text: str,
+        source: str,
+        target: str,
+        *,
+        report: bool = False,
+    ) -> str:
+        """长文：按空行切段分别翻译，只请求真正变过的段（命中缓存就跳过）。
+
+        这样粘贴一整篇文章能立刻全译，之后改一句也只会重译那一段。
+        """
+        parts = text.split("\n\n")
+        todo = [part for part in parts if part.strip()]
+        unique: list[str] = list(dict.fromkeys(todo))
+        done: dict[str, str] = {}
+        semaphore = asyncio.Semaphore(BLOCK_CONCURRENCY)
+        finished = 0
+        total = len(unique)
+        self._progress = f"0/{total}"
+        self._sync_status()
+
+        async def one(block: str) -> None:
+            nonlocal finished
+            async with semaphore:
+                result = await backends.translate(backend, client, block, source, target)
+                done[block] = result.text
+            finished += 1
+            self._progress = f"{finished}/{total}"
+            self._sync_status()
+
+        try:
+            await asyncio.gather(*(one(block) for block in unique))
+        finally:
+            self._progress = ""
+            self._sync_status()
+        if report and total > 3:
+            self.notify(f"已按段实时翻译 {total} 段", timeout=3)
+        return "\n\n".join(done.get(part, part) for part in parts)
 
     @work(exclusive=True, group="live", exit_on_error=False)
     async def _live_worker(self, side: str, text: str, source: str, target: str) -> None:
@@ -1234,7 +1282,13 @@ class Linguatui(App[None]):
             return  # 启动时已经提示过了
         self._set_busy(1)
         try:
-            result = await backends.translate(backend, client, text, source, target)
+            if len(text) > LONG_DOC:
+                payload = await self._translate_long(
+                    backend, client, text, source, target, report=True
+                )
+            else:
+                result = await backends.translate(backend, client, text, source, target)
+                payload = result.text
         except asyncio.CancelledError:
             raise
         except backends.TranslateError as exc:
@@ -1247,7 +1301,6 @@ class Linguatui(App[None]):
                 return
             other_side = self._other(side)
             other = self.ta(other_side)
-            payload = result.text
             self._programmatic[other_side] = payload
             if payload.strip() != other.text.strip():
                 other.load_text(payload)
@@ -1446,7 +1499,13 @@ class Linguatui(App[None]):
             return
         self._set_busy(1)
         try:
-            result = await backends.translate(backend, client, text, source, target)
+            if len(text) > LONG_DOC:
+                payload = await self._translate_long(backend, client, text, source, target)
+                cached = False
+            else:
+                result = await backends.translate(backend, client, text, source, target)
+                payload = result.text
+                cached = result.cached
         except asyncio.CancelledError:
             raise
         except backends.TranslateError as exc:
@@ -1455,7 +1514,6 @@ class Linguatui(App[None]):
             self.notify(f"{type(exc).__name__}: {exc}", title="翻译失败", severity="error", timeout=10)
         else:
             other = self.ta(self._other(side))
-            payload = result.text
             if append and other.text.strip():
                 payload = other.text.rstrip("\n") + "\n\n" + payload
             self._programmatic[self._other(side)] = payload
@@ -1463,9 +1521,9 @@ class Linguatui(App[None]):
             other.scroll_home(animate=False)
             self._texts[self._other(side)] = payload
             self._sync_titles()
-            note = "（来自缓存）" if result.cached else ""
+            note = "（来自缓存）" if cached else ""
             self.notify(
-                f"{len(text)} 字 → {len(result.text)} 字 {langs.label(target)}{note}",
+                f"{len(text)} 字 → {len(payload)} 字 {langs.label(target)}{note}",
                 title="全文翻译完成",
                 timeout=4,
             )

@@ -533,6 +533,62 @@ async def main() -> int:
         f"偏移转行列 -> {_loc_from_offset(['abc', 'def'], 0, 1, 5)}",
     )
 
+    # 24b. 长文：粘贴即按段翻译；改一段只重译一段
+    import linguatui.backends as _backends
+
+    para = (
+        "Artificial intelligence is reshaping how we read and write. "
+        "Researchers argue that a language model is not only a tool but also a medium. "
+    )
+    long_doc = "\n\n".join(f"Paragraph {i}. " + para * 3 for i in range(1, 9))
+    calls: list[str] = []
+    original_translate = _backends.translate
+
+    async def counting_translate(backend, client, text, source, target, **kwargs):
+        result = await original_translate(backend, client, text, source, target, **kwargs)
+        if not result.cached:
+            calls.append(text[:24])
+        return result
+
+    cfg_long = config.load()
+    cfg_long.align = "heuristic"
+    cfg_long.left_lang, cfg_long.right_lang = "en", "zh-CN"
+    cfg_long.live = "left"
+    cfg_long.auto_popup = False
+    cfg_long.remember_text = False
+    app_long = Linguatui(cfg_long)
+    _backends.translate = counting_translate
+    try:
+        async with app_long.run_test(size=(120, 30)) as pilot:
+            lt_long = app_long.query_one("#ta-left", TextArea)
+            rt_long = app_long.query_one("#ta-right", TextArea)
+            lt_long.load_text(long_doc)
+            for _ in range(200):
+                await pilot.pause(0.2)
+                if rt_long.text.count("\n\n") >= 7 and rt_long.text.strip():
+                    break
+            first_calls = len(calls)
+            check(first_calls >= 6, f"长文粘贴即译：{len(long_doc)} 字，{first_calls} 次请求")
+            check(
+                len(rt_long.text.split("\n\n")) == len(long_doc.split("\n\n")),
+                "长文按段翻译，段落结构保持 "
+                f"{len(rt_long.text.split(chr(10) * 2))} 段",
+            )
+            before = len(calls)
+            third = rt_long.text.split("\n\n")[2]
+            lt_long.load_text(long_doc.replace("Paragraph 3.", "Paragraph 3 EDITED."))
+            for _ in range(200):
+                await pilot.pause(0.2)
+                blocks = rt_long.text.split("\n\n")
+                if len(blocks) >= 3 and blocks[2] != third:
+                    break
+            check(
+                len(calls) - before <= 2,
+                f"只重译改动的那一段（新增请求 {len(calls) - before} 次）",
+            )
+    finally:
+        _backends.translate = original_translate
+
     # 25. 词对齐模型（需要依赖 + 模型；默认跳过，避免 CI 下载 700MB）
     from linguatui.aligner import missing_dependencies
 
