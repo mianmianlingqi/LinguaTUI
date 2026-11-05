@@ -72,16 +72,21 @@ python -m linguatui
 
 1. 段落层：按空行切块，第 N 段对第 N 段（输入即译 / `Ctrl+T` 的译文都保留空行结构）；
 2. 句子层：两边句数一致时，先锚定到同一句（中文 `。！？；` / 英文 `.!?` 都算句末）；
-3. 分句/词层：在锚定的句子里按字符比例定位，把首尾扩到完整单词边界，再扩到「包含它的分句」——即使比例差一两个词，高亮也一定覆盖正确的分句（英文没逗号时自然退化成整句），不会只点亮隔壁半句。
+3. 词层：句内按字符比例定位，首尾扩到完整单词；若选中内容里有**两边写法相同**的 token（`3.5%`、`Qwen3.5-0.8B`、`[4]` 这类），就以它为锚点平移对齐——这是唯一能真正"精确"的部分；
+4. 分句兜底：若定位结果跨了逗号，就扩到「包含它的分句」；英文没逗号时退化成整句。保证高亮一定覆盖对应内容，不会只点亮隔壁半句。
 
-实测（中→英）：
+实测（中→英，`python tests/align_bench.py` 给出 8/9 命中）：
 
 | 选中 | 高亮到 |
 | --- | --- |
-| `作者将结果描述` | `The authors described the results` |
-| `审稿人指出` | `Commentators noted that` |
+| `后者使用固定算法进行狭窄的更改` | `which use a fixed algorithm to make narrow changes` |
+| `例如更新单个事实` | `changes like updating a single fact` |
+| `编辑 3.5% 的权重` | `...by editing 3.5% of its weights, and wrote...`（数字锚点） |
 | `数千个权重` | `thousands of weights and` |
-| `可解释的人工智能` | `explainable AI, fine-tuning and` |
+| `同样的任务` | `the same tasks` |
+
+> 纯文字片段的词级位置是**启发式**的（中英语序会重排，翻译接口也不返回词对齐），误差约 ±1 个词组；
+> 分句兜底保证"答案一定在高亮里"。要 100% 词级，需要词对齐模型（数百 MB 依赖）或 LLM 对齐请求——目前没引入。
 
 两栏段落数对不上时，会退化为「按整篇相对位置找段」（相差超过 2 倍就不猜）。
 改动任一栏的文字或点击别处，对照高亮会自动清除。
@@ -180,10 +185,16 @@ python -m linguatui --left-lang ja --right-lang zh-CN --provider deepl
 python tests\smoke.py
 ```
 
-无头启动真实的 App（`App.run_test`）并打真实网络请求，跑通 54 项：输入即译、Ctrl+R 方向循环、
+无头启动真实的 App（`App.run_test`）并打真实网络请求，跑通 55 项：输入即译、Ctrl+R 方向循环、
 拖选对照（另一栏高亮对应段落）、Ctrl+拖选弹窗、替换、Ctrl+G 段落翻译、全文翻译、反向翻译、交换、语言/引擎选择器、帮助、
 键盘选中、插入另一栏、缓存命中、窄窗口布局、长文本、缺 key 提示、配置往返。
 渲染结果写到 `tests/_screen_*.txt`，README 顶部那张图由 `tests/make_readme_screenshot.py` 生成。
+
+另有一组对照对齐的质量基准，改算法前后跑一下防止退化：
+
+```bat
+python testslign_bench.py     :: 命中 8/9
+```
 
 ## 命令行自检之外
 

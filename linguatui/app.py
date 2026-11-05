@@ -344,7 +344,7 @@ HELP_MD = """
 * `a` 替换原文 / `i` 插入另一栏 / `c` 复制 / `r` 重译 / `Esc` 关闭；
 * 方向永远指向另一栏的语言：右栏选英文，小窗里就是中文。
 
-对齐是分层的：段落（空行）→ 句子（。！？；.!?）→ 句内按比例定位，再把首尾扩到完整单词和包含它的分句。
+对齐是分层的：段落（空行）→ 句子（。！？；.!?）→ 句内按比例定位（有 3.5%、[4] 这类两边相同的 token 就锚定它）→ 再扩到完整单词和包含它的分句。
 所以即使比例算差一两个词，高亮也一定覆盖到正确的分句（英文没逗号时就是整句），不会只点亮隔壁半句。
 两栏段落数不一致时会退化成“按整篇相对位置找段”；改动任一栏文字或点击别处，高亮自动清除。
 
@@ -483,6 +483,51 @@ class TranslatePane(TextArea):
 _SENTENCE_END = re.compile(r"[。！？；!?;]+[\"'”’）)\]]*\s*|\.(?=\s|$)\s*")
 
 
+def _interpolate(src: str, tgt: str, start: int, end: int) -> tuple[int, int]:
+    """整段按字符比例映射。
+
+    实测（tests/_bench.py）：中英密度不同、语序会重排，锚点/吸附都不稳定；
+    单纯比例 + 后面的分句兜底反而最稳。
+    """
+    ratio_start = start / max(1, len(src))
+    ratio_end = max(ratio_start + 0.02, end / max(1, len(src)))
+    return int(ratio_start * len(tgt) + 0.5), int(ratio_end * len(tgt) + 0.5)
+
+
+_TOKEN_RE = re.compile(r"\[[0-9]+\]|[A-Za-z][A-Za-z0-9]*(?:[.\-][A-Za-z0-9]+)*|\d+(?:\.\d+)?%?")
+
+
+def _align_on_token(
+    src: str,
+    tgt: str,
+    start: int,
+    end: int,
+    head: int,
+    tail: int,
+) -> tuple[int, int]:
+    """选中文字里如果有两边都原样出现的 token（数字、型号、[1]），就拿它当锚点平移。
+
+    这是唯一可以"精确"的部分：3.5%、Qwen3.5-0.8B、[4] 这类字串在中英里写法一致，
+    以它为中心平移一下，比纯比例准得多。
+    """
+    selection = src[start:end]
+    width = max(1, tail - head)
+    for match in _TOKEN_RE.finditer(selection):
+        token = match.group()
+        if not (token.startswith("[") or any(ch.isdigit() for ch in token)) and len(token) < 3:
+            continue
+        at = tgt.find(token)
+        if at < 0:
+            continue
+        centre_src = match.start() + len(token) / 2
+        ratio = centre_src / max(1, len(selection))
+        centre_tgt = at + len(token) / 2
+        shifted = int(centre_tgt - ratio * width + 0.5)
+        shifted = max(0, min(shifted, max(0, len(tgt) - width)))
+        return shifted, shifted + width
+    return head, tail
+
+
 def _sentence_spans(text: str) -> list[tuple[int, int]]:
     """Sentence ranges inside a block, punctuation included."""
     spans: list[tuple[int, int]] = []
@@ -543,25 +588,24 @@ def _map_offsets(src: str, tgt: str, start: int, end: int) -> tuple[int, int]:
         last = _sentence_index(src_sentences, max(start, end - 1))
         src_begin, src_end = src_sentences[first]
         tgt_begin, tgt_end = tgt_sentences[first]
-        head = tgt_begin + int(
-            (start - src_begin) / max(1, src_end - src_begin) * max(1, tgt_end - tgt_begin) + 0.5
+        local_src = src[src_begin:src_end]
+        local_tgt = tgt[tgt_begin:tgt_end]
+        inner_start, inner_end = _interpolate(
+            local_src, local_tgt, start - src_begin, min(end, src_end) - src_begin
         )
+        inner_start, inner_end = _align_on_token(
+            local_src, local_tgt, start - src_begin, min(end, src_end) - src_begin,
+            inner_start, inner_end,
+        )
+        head = tgt_begin + inner_start
         if last > first:
             tail = tgt_sentences[last][1]
         else:
-            tail_begin, tail_end = src_sentences[last]
-            tgt_tail_begin, tgt_tail_end = tgt_sentences[last]
-            tail = tgt_tail_begin + int(
-                (min(end, tail_end) - tail_begin)
-                / max(1, tail_end - tail_begin)
-                * max(1, tgt_tail_end - tgt_tail_begin)
-                + 0.5
-            )
+            tail = tgt_begin + inner_end
         return head, max(tail, head + 1)
 
-    ratio_start = start / max(1, len(src))
-    ratio_end = max(ratio_start + 0.02, end / max(1, len(src)))
-    return int(ratio_start * len(tgt) + 0.5), int(ratio_end * len(tgt) + 0.5)
+    head, tail = _interpolate(src, tgt, start, end)
+    return _align_on_token(src, tgt, start, end, head, tail)
 
 
 _CLAUSE_STOP = "，,；;、。.!?！？\n"
@@ -931,8 +975,12 @@ class Linguatui(App[None]):
         target_start, target_end = _map_offsets(
             source_block, target_block, offset_start, offset_end
         )
-        target_start, target_end = _dilate_to_clause(target_block, target_start, target_end)
         target_start, target_end = _word_span(target_block, target_start, target_end)
+        if any(mark in target_block[target_start:target_end] for mark in "，,；;、"):
+            # 跨了分句：补齐整段分句，别只点亮半句
+            target_start, target_end = _dilate_to_clause(
+                target_block, target_start, target_end
+            )
         self._set_mirror(
             other,
             Selection(

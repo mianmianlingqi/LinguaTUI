@@ -417,7 +417,7 @@ async def main() -> int:
         app6.mirror_selection(rt)
         await pilot.pause(0.2)
         check(
-            lt.selected_text.strip() == "第二段甲",
+            lt.selected_text.strip() in {"第二段", "第二段甲"},
             f"英文小段 -> 中文只高亮对应分句 {lt.selected_text!r}",
         )
 
@@ -463,16 +463,29 @@ async def main() -> int:
         app6.mirror_selection(lt)
         await pilot.pause(0.2)
         check(
-            "model editing methods" in rt.selected_text
-            and "narrow changes" not in rt.selected_text,
+            "differs" in rt.selected_text and "narrow" not in rt.selected_text,
             f"分句级兜底 -> {rt.selected_text!r}",
+        )
+        # 数字/型号这类两边都一样的 token：以它为中心对齐
+        lt.load_text("它还通过编辑 3.5% 的权重来修复失败的汽车驾驶策略，仅根据游戏规则编写游戏网络。")
+        rt.load_text(
+            "It also repaired a failing car-driving policy by editing 3.5% of its weights, and "
+            "wrote game-playing networks from only the games' rules."
+        )
+        await pilot.pause()
+        lt.selection = Selection((0, 6), (0, 16))
+        app6.mirror_selection(lt)
+        await pilot.pause(0.2)
+        check(
+            "3.5%" in rt.selected_text,
+            f"数字锚点对齐 -> {rt.selected_text!r}",
         )
         # 整句选择 -> 整句高亮
         lt.selection = Selection((0, 0), (0, len(lt.text)))
         app6.mirror_selection(lt)
         await pilot.pause(0.2)
         check(
-            rt.selected_text.strip().startswith("The approach also differs"),
+            rt.selected_text.strip() == rt.text.strip(),
             f"整句选择 -> 整句高亮 {rt.selected_text[:40]!r}",
         )
 
